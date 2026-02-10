@@ -94,6 +94,16 @@ M.is_posting_line = function(line)
   return line:match("^%s+[A-Z][a-zA-Z0-9:_-]+") ~= nil
 end
 
+-- Check if a line is a balance directive
+-- Balance lines: YYYY-MM-DD balance Account:Name  Amount Currency
+M.is_balance_line = function(line)
+  if not line or type(line) ~= "string" then
+    return false
+  end
+  -- Balance lines start with date, followed by "balance" keyword
+  return line:match("^%d%d%d%d%-%d%d%-%d%d%s+balance%s+") ~= nil
+end
+
 M.align_amount = function(line_num)
   local line = vim.fn.getline(line_num)
   local separator_col = config.get("separator_column")
@@ -224,6 +234,46 @@ M.format_posting_line = function(line_num, separator_col)
   end
 end
 
+-- Format a balance directive line
+-- Balance format: YYYY-MM-DD balance Account:Name  Amount Currency
+M.format_balance_line = function(line_num, separator_col)
+  local line = vim.fn.getline(line_num)
+
+  -- Parse the balance line: date, "balance", account, amount
+  local date, account, amount = line:match("^(%d%d%d%d%-%d%d%-%d%d)%s+balance%s+([A-Z][a-zA-Z0-9:_-]+)%s+(.*)$")
+  if not date or not account or not amount then
+    return
+  end
+
+  -- Find decimal point in amount
+  local amount_with_decimal = amount:match("([%-+]?%d[%d,]*%.)")
+  if not amount_with_decimal then
+    -- No decimal point found, use simple alignment
+    local content_before = date .. " balance " .. account
+    local content_width = M.display_width(content_before)
+    if content_width < separator_col then
+      local padding = separator_col - content_width
+      local new_line = content_before .. string.rep(" ", padding) .. amount
+      vim.fn.setline(line_num, new_line)
+    end
+    return
+  end
+
+  -- Calculate where decimal point should be positioned
+  local content_before = date .. " balance " .. account
+  local content_before_width = M.display_width(content_before)
+  local amount_before_decimal_width = M.display_width(amount_with_decimal) - 1 -- -1 for the decimal point itself
+
+  -- Target position for decimal point (separator_col - 1, like VSCode)
+  local target_decimal_pos = separator_col - 1
+  local needed_padding = target_decimal_pos - content_before_width - amount_before_decimal_width
+
+  if needed_padding > 0 then
+    local new_line = content_before .. string.rep(" ", needed_padding) .. amount
+    vim.fn.setline(line_num, new_line)
+  end
+end
+
 -- Calculate display width, considering CJK characters if configured
 M.display_width = function(text)
   if config.get("fixed_cjk_width") then
@@ -265,6 +315,10 @@ M.format_buffer = function()
     -- Format posting lines within transactions
     if M.is_posting_line(line) then
       M.format_posting_line(line_num, separator_col)
+      formatted_lines = formatted_lines + 1
+    -- Format balance directive lines
+    elseif M.is_balance_line(line) then
+      M.format_balance_line(line_num, separator_col)
       formatted_lines = formatted_lines + 1
     end
   end
