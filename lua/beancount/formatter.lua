@@ -80,9 +80,14 @@ M.align_current_line = function()
   local line = vim.fn.getline(line_num)
   local col = vim.fn.col(".")
 
-  -- Check if we just inserted a decimal point in a posting line
-  if M.is_posting_line(line) and line:find("%.", col - 1) then
-    M.align_amount(line_num)
+  -- Check if we just inserted a decimal point in a posting or balance line
+  if line:find("%.", col - 1) then
+    if M.is_posting_line(line) then
+      M.align_amount(line_num)
+    elseif M.is_balance_line(line) then
+      local separator_col = config.get("separator_column")
+      M.format_balance_line(line_num, separator_col)
+    end
   end
 end
 
@@ -196,31 +201,26 @@ M.format_transaction = function(start_line, end_line)
   end
 end
 
-M.format_posting_line = function(line_num, separator_col)
-  local line = vim.fn.getline(line_num)
-
-  -- Parse the posting line
-  local indent, account, amount = line:match("^(%s+)([A-Z][a-zA-Z0-9:_-]+)%s+(.*)$")
-  if not indent or not account or not amount then
-    return
-  end
-
-  -- Find decimal point in amount (like VSCode: /([\-|\+]?)(?:\d|\d[\d,]*\d)(\.)/)
+-- Generic line formatting function that handles both posting and balance lines
+-- @param line_num number: Line number to format
+-- @param separator_col number: Target column for amount alignment
+-- @param content_before string: Content before the amount (e.g., "  Account:Name" or "2024-01-01 balance Account:Name")
+-- @param amount string: The amount part to align
+local function format_line_with_amount(line_num, separator_col, content_before, amount)
+  -- Find decimal point in amount (like VSCode: /([\\-|\\+]?)(?:\\d|\\d[\\d,]*\\d)(\\.)/)
   local amount_with_decimal = amount:match("([%-+]?%d[%d,]*%.)")
   if not amount_with_decimal then
-    -- No decimal point found, use old logic
-    local account_part = indent .. account
-    local account_width = M.display_width(account_part)
-    if account_width < separator_col then
-      local padding = separator_col - account_width
-      local new_line = account_part .. string.rep(" ", padding) .. amount
+    -- No decimal point found, use simple alignment
+    local content_width = M.display_width(content_before)
+    if content_width < separator_col then
+      local padding = separator_col - content_width
+      local new_line = content_before .. string.rep(" ", padding) .. amount
       vim.fn.setline(line_num, new_line)
     end
     return
   end
 
   -- Calculate where decimal point should be positioned
-  local content_before = indent .. account
   local content_before_width = M.display_width(content_before)
   local amount_before_decimal_width = M.display_width(amount_with_decimal) - 1 -- -1 for the decimal point itself
 
@@ -234,8 +234,22 @@ M.format_posting_line = function(line_num, separator_col)
   end
 end
 
+M.format_posting_line = function(line_num, separator_col)
+  local line = vim.fn.getline(line_num)
+
+  -- Parse the posting line
+  local indent, account, amount = line:match("^(%s+)([A-Z][a-zA-Z0-9:_-]+)%s+(.*)$")
+  if not indent or not account or not amount then
+    return
+  end
+
+  local content_before = indent .. account
+  format_line_with_amount(line_num, separator_col, content_before, amount)
+end
+
 -- Format a balance directive line
 -- Balance format: YYYY-MM-DD balance Account:Name  Amount Currency
+-- Note: This normalizes whitespace between date, "balance", and account to single spaces
 M.format_balance_line = function(line_num, separator_col)
   local line = vim.fn.getline(line_num)
 
@@ -245,33 +259,9 @@ M.format_balance_line = function(line_num, separator_col)
     return
   end
 
-  -- Find decimal point in amount
-  local amount_with_decimal = amount:match("([%-+]?%d[%d,]*%.)")
-  if not amount_with_decimal then
-    -- No decimal point found, use simple alignment
-    local content_before = date .. " balance " .. account
-    local content_width = M.display_width(content_before)
-    if content_width < separator_col then
-      local padding = separator_col - content_width
-      local new_line = content_before .. string.rep(" ", padding) .. amount
-      vim.fn.setline(line_num, new_line)
-    end
-    return
-  end
-
-  -- Calculate where decimal point should be positioned
+  -- Reconstruct content_before with normalized spacing
   local content_before = date .. " balance " .. account
-  local content_before_width = M.display_width(content_before)
-  local amount_before_decimal_width = M.display_width(amount_with_decimal) - 1 -- -1 for the decimal point itself
-
-  -- Target position for decimal point (separator_col - 1, like VSCode)
-  local target_decimal_pos = separator_col - 1
-  local needed_padding = target_decimal_pos - content_before_width - amount_before_decimal_width
-
-  if needed_padding > 0 then
-    local new_line = content_before .. string.rep(" ", needed_padding) .. amount
-    vim.fn.setline(line_num, new_line)
-  end
+  format_line_with_amount(line_num, separator_col, content_before, amount)
 end
 
 -- Calculate display width, considering CJK characters if configured
