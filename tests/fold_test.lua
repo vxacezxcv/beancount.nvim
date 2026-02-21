@@ -53,6 +53,37 @@ local function restore_vim_functions()
   vim.v.lnum = original_v_lnum
 end
 
+-- Mock vim.api buffer functions for marker tests
+local original_nvim_get_current_buf = vim.api.nvim_get_current_buf
+local original_nvim_buf_get_changedtick = vim.api.nvim_buf_get_changedtick
+local original_nvim_buf_get_lines = vim.api.nvim_buf_get_lines
+local mock_tick_counter = 0
+
+local function mock_buffer(lines, lnum)
+  mock_tick_counter = mock_tick_counter + 1
+  local current_tick = mock_tick_counter
+  vim.api.nvim_get_current_buf = function() return 999 end
+  vim.api.nvim_buf_get_changedtick = function(_) return current_tick end
+  vim.api.nvim_buf_get_lines = function(_, s, e, _)
+    if s == 0 and e == -1 then return lines end
+    return {}
+  end
+  vim.fn.getline = function(_) return lines[lnum] or "" end
+  vim.v.lnum = lnum
+end
+
+local function set_lnum(lines, lnum)
+  vim.fn.getline = function(_) return lines[lnum] or "" end
+  vim.v.lnum = lnum
+end
+
+local function restore_all_mocks()
+  vim.api.nvim_get_current_buf = original_nvim_get_current_buf
+  vim.api.nvim_buf_get_changedtick = original_nvim_buf_get_changedtick
+  vim.api.nvim_buf_get_lines = original_nvim_buf_get_lines
+  restore_vim_functions()
+end
+
 -- Test 1: Basic module loading
 run_test("should load fold module", function()
   local fold = get_fold()
@@ -1082,6 +1113,231 @@ run_test("should maintain proper state isolation", function()
   test_assert(result1 == result2 and result2 == result3, "multiple calls should return consistent results")
 
   restore_vim_functions()
+end)
+
+-- Test 47: Basic fold marker open/close detection
+run_test("should detect basic {{{ and }}} markers", function()
+  local fold = get_fold()
+  local lines = {
+    "; Section {{{",
+    '2025-01-01 * "transaction"',
+    "  Assets:One  400.00 USD",
+    "",
+    "; }}}",
+  }
+  mock_buffer(lines, 1)
+  test_assert(fold.foldexpr() == ">1", "open marker should return '>1'")
+  set_lnum(lines, 5)
+  test_assert(fold.foldexpr() == "<1", "close marker should return '<1'")
+  restore_all_mocks()
+end)
+
+-- Test 48: Numbered markers {{{2 and }}}2
+run_test("should handle numbered markers {{{2 and }}}2", function()
+  local fold = get_fold()
+  local lines = {
+    "; {{{2",
+    "",
+    "; }}}2",
+  }
+  mock_buffer(lines, 1)
+  test_assert(fold.foldexpr() == ">2", "numbered open marker {{{2 should return '>2'")
+  set_lnum(lines, 3)
+  test_assert(fold.foldexpr() == "<2", "numbered close marker }}}2 should return '<2'")
+  restore_all_mocks()
+end)
+
+-- Test 49: Blank lines inside markers return marker level (not "0")
+run_test("should return marker level for blank lines inside markers", function()
+  local fold = get_fold()
+  local lines = {
+    "; outer {{{",
+    "",
+    "; }}}",
+  }
+  mock_buffer(lines, 2)
+  test_assert(fold.foldexpr() == "1", "blank line inside level-1 marker should return '1' not '0'")
+  restore_all_mocks()
+end)
+
+-- Test 50: Transactions inside markers return marker_level + 1
+run_test("should return marker_level+1 for transactions inside markers", function()
+  local fold = get_fold()
+  local lines = {
+    "; {{{",
+    '2025-01-01 * "transaction"',
+    "  Assets:One  400.00 USD",
+    "  Assets:Two",
+    "; }}}",
+  }
+  mock_buffer(lines, 2)
+  test_assert(fold.foldexpr() == ">2", "transaction inside marker should return '>2'")
+  set_lnum(lines, 3)
+  test_assert(fold.foldexpr() == "=", "posting inside marker should still return '='")
+  restore_all_mocks()
+end)
+
+-- Test 51: Nested markers
+run_test("should handle nested {{{ markers correctly", function()
+  local fold = get_fold()
+  local lines = {
+    "; outer {{{",
+    "; inner {{{",
+    "",
+    "; inner }}}",
+    "",
+    "; outer }}}",
+  }
+  mock_buffer(lines, 1)
+  test_assert(fold.foldexpr() == ">1", "outer open marker should return '>1'")
+  set_lnum(lines, 2)
+  test_assert(fold.foldexpr() == ">2", "inner open marker should return '>2'")
+  set_lnum(lines, 3)
+  test_assert(fold.foldexpr() == "2", "blank inside inner marker should return '2'")
+  set_lnum(lines, 4)
+  test_assert(fold.foldexpr() == "<2", "inner close marker should return '<2'")
+  set_lnum(lines, 5)
+  test_assert(fold.foldexpr() == "1", "blank inside outer marker (after inner close) should return '1'")
+  set_lnum(lines, 6)
+  test_assert(fold.foldexpr() == "<1", "outer close marker should return '<1'")
+  restore_all_mocks()
+end)
+
+-- Test 52: No markers - regression test for unchanged behavior
+run_test("should preserve existing behavior when no markers present", function()
+  local fold = get_fold()
+  local lines = {
+    '2025-01-01 * "transaction"',
+    "  Assets:One  400.00 USD",
+    "",
+    "2025-01-01 open Assets:Checking",
+    "",
+  }
+  mock_buffer(lines, 1)
+  test_assert(fold.foldexpr() == ">1", "transaction with no markers should return '>1'")
+  set_lnum(lines, 2)
+  test_assert(fold.foldexpr() == "=", "posting with no markers should return '='")
+  set_lnum(lines, 3)
+  test_assert(fold.foldexpr() == "0", "blank line with no markers should return '0'")
+  set_lnum(lines, 4)
+  test_assert(fold.foldexpr() == ">1", "directive with no markers should return '>1'")
+  restore_all_mocks()
+end)
+
+-- Test 53: Markers embedded in comment lines (common beancount pattern)
+run_test("should handle markers embedded in comment lines", function()
+  local fold = get_fold()
+  local lines = {
+    "; Account One {{{",
+    '2025-01-01 * "transaction"',
+    "  Assets:One  400.00 USD",
+    "; }}}",
+  }
+  mock_buffer(lines, 1)
+  test_assert(fold.foldexpr() == ">1", "comment line with {{{ should return '>1'")
+  set_lnum(lines, 4)
+  test_assert(fold.foldexpr() == "<1", "comment line with }}} should return '<1'")
+  restore_all_mocks()
+end)
+
+-- Test 54: Explicitly numbered nested markers {{{1 / {{{2
+run_test("should handle explicitly numbered nested markers {{{1 and {{{2", function()
+  local fold = get_fold()
+  local lines = {
+    "; level1 {{{1",
+    "; level2 {{{2",
+    "",
+    "; end level2 }}}2",
+    "",
+    "; end level1 }}}1",
+  }
+  mock_buffer(lines, 1)
+  test_assert(fold.foldexpr() == ">1", "{{{1 should return '>1'")
+  set_lnum(lines, 2)
+  test_assert(fold.foldexpr() == ">2", "{{{2 should return '>2'")
+  set_lnum(lines, 3)
+  test_assert(fold.foldexpr() == "2", "blank inside {{{2 region should return '2'")
+  set_lnum(lines, 4)
+  test_assert(fold.foldexpr() == "<2", "}}}2 should return '<2'")
+  set_lnum(lines, 5)
+  test_assert(fold.foldexpr() == "1", "blank inside {{{1 region (after }}}2) should return '1'")
+  set_lnum(lines, 6)
+  test_assert(fold.foldexpr() == "<1", "}}}1 should return '<1'")
+  restore_all_mocks()
+end)
+
+-- Test 55: Marker cache should be per-buffer, not globally single-entry
+run_test("should cache marker levels independently per buffer", function()
+  local fold = get_fold()
+  local buffers = {
+    [1001] = {
+      tick = 1,
+      lines = {
+        "; a {{{",
+        "",
+        "; }}}",
+      },
+    },
+    [1002] = {
+      tick = 1,
+      lines = {
+        "; b {{{",
+        "",
+        "; }}}",
+      },
+    },
+  }
+
+  local current_buf = 1001
+  local scan_calls = { [1001] = 0, [1002] = 0 }
+
+  vim.api.nvim_get_current_buf = function() return current_buf end
+  vim.api.nvim_buf_get_changedtick = function(bufnr) return buffers[bufnr].tick end
+  vim.api.nvim_buf_get_lines = function(bufnr, s, e, _)
+    if s == 0 and e == -1 then
+      scan_calls[bufnr] = scan_calls[bufnr] + 1
+      return buffers[bufnr].lines
+    end
+    return {}
+  end
+  vim.fn.getline = function(_) return buffers[current_buf].lines[vim.v.lnum] or "" end
+
+  for _ = 1, 4 do
+    current_buf = 1001
+    vim.v.lnum = 2
+    fold.foldexpr()
+
+    current_buf = 1002
+    vim.v.lnum = 2
+    fold.foldexpr()
+  end
+
+  test_assert(scan_calls[1001] == 1, "buffer 1001 should be scanned once when unchanged")
+  test_assert(scan_calls[1002] == 1, "buffer 1002 should be scanned once when unchanged")
+
+  current_buf = 1001
+  buffers[1001].tick = 2
+  vim.v.lnum = 2
+  fold.foldexpr()
+  test_assert(scan_calls[1001] == 2, "buffer 1001 should rescan after changedtick update")
+  test_assert(scan_calls[1002] == 1, "buffer 1002 should keep cached levels when unchanged")
+
+  restore_all_mocks()
+end)
+
+-- Test 56: Lines containing both open+close markers should not leak level
+run_test("should not leak marker depth for lines containing both {{{ and }}}", function()
+  local fold = get_fold()
+  local lines = {
+    "; inline {{{ }}}",
+    '2025-01-01 * "txn"',
+  }
+
+  mock_buffer(lines, 1)
+  fold.foldexpr()
+  set_lnum(lines, 2)
+  test_assert(fold.foldexpr() == ">1", "transaction after inline open+close markers should stay at base level 0")
+  restore_all_mocks()
 end)
 
 -- Print summary
